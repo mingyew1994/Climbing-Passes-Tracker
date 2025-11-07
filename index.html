@@ -5,37 +5,73 @@
   <title>Climbing Pass Tracker</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Tailwind (CDN) for quick styling) -->
+  <!-- Tailwind (CDN) -->
   <script src="https://cdn.tailwindcss.com"></script>
 
   <!-- Google Identity Services -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
 
   <!--
-    ========================== IMPORTANT SETUP ==========================
-    1) Create a Google Cloud project → OAuth 2.0 Client ID (Web) with:
-       - Authorized JavaScript origins:
-         e.g. https://<your-username>.github.io  (or your custom domain)
-    2) Enable the "Google Drive API".
-    3) Replace CLIENT_ID below with your OAuth client id.
-    4) This app uses scope: https://www.googleapis.com/auth/drive.file
-       - Access limited to files/folders the app creates (and ones the user explicitly opens via the app).
-       - Files/folder are NOT hidden (user can see & delete them anytime in Drive).
-    5) Host this file on GitHub Pages and you're done.
-    ====================================================================
+    HOW TO USE
+    1) In Google Cloud Console:
+       - Enable "Google Drive API"
+       - OAuth consent screen: External; add scope https://www.googleapis.com/auth/drive.file
+       - Create OAuth 2.0 Client: Application type = Web; Authorized JavaScript origins =
+         https://mingyew1994.github.io  (and optionally http://localhost:5500)
+       - Leave Redirect URIs EMPTY.
+    2) Paste your OAuth Client ID into CONFIG.CLIENT_ID below.
+    3) Commit this file to GitHub Pages.
   -->
 
   <style>
-    /* Minimal focus & transitions */
     :root { color-scheme: light dark; }
     .fade { transition: all 200ms ease; }
-    .card { @apply rounded-2xl shadow p-5 bg-white/80 dark:bg-neutral-900/70 backdrop-blur; }
-    .ghost-btn { @apply px-3 py-1.5 rounded-xl border hover:shadow-sm text-sm; }
-    .primary-btn { @apply px-4 py-2 rounded-xl text-white bg-blue-600 hover:bg-blue-700 shadow; }
-    .danger-btn { @apply px-3 py-1.5 rounded-xl text-white bg-rose-600 hover:bg-rose-700 shadow; }
-    .pill { @apply text-xs px-2 py-1 rounded-full; }
-    .input { @apply border rounded-xl px-3 py-2 w-full bg-white dark:bg-neutral-800; }
-    .linkish { @apply underline underline-offset-2 hover:opacity-80 cursor-pointer; }
+    .card { /* utility wrapper; works with Tailwind via @apply at build-time, but keep base look inline */
+      border-radius: 1rem;
+      box-shadow: 0 6px 20px rgba(0,0,0,.06);
+      padding: 1.25rem;
+      background: rgba(255,255,255,.8);
+      backdrop-filter: blur(4px);
+    }
+    @media (prefers-color-scheme: dark) {
+      .card { background: rgba(23,23,23,.7); }
+    }
+    .ghost-btn { padding:.4rem .8rem; border-radius:.75rem; border:1px solid rgba(0,0,0,.15); }
+    .primary-btn { padding:.55rem 1rem; border-radius:.9rem; color:#fff; background:#2563eb; }
+    .primary-btn:hover { background:#1d4ed8; }
+    .danger-btn { padding:.45rem .9rem; border-radius:.9rem; color:#fff; background:#e11d48; }
+    .danger-btn:hover { background:#be123c; }
+    .pill { font-size:.75rem; padding:.25rem .5rem; border-radius:999px; }
+
+    /* New +/- buttons */
+    .use-btn {
+      padding:.45rem .75rem;
+      border-radius:.8rem;
+      font-weight:700;
+      border:1px solid #d1d5db;
+      background:#f3f4f6;
+      transition: transform .08s ease, background-color .15s ease, box-shadow .15s ease;
+      box-shadow: 0 1px 0 rgba(0,0,0,.04);
+    }
+    .use-btn:active { transform: scale(.95); }
+    .use-btn.plus { color:#065f46; background:#ecfdf5; border-color:#6ee7b7; }
+    .use-btn.plus:hover { background:#d1fae5; }
+    .use-btn.minus { color:#9f1239; background:#fff1f2; border-color:#fda4af; }
+    .use-btn.minus:hover { background:#ffe4e6; }
+
+    /* Feedback flash on click */
+    @keyframes flash {
+      0%   { box-shadow: 0 0 0 6px rgba(250,204,21,.35); }
+      100% { box-shadow: 0 0 0 0 rgba(250,204,21,0); }
+    }
+    .flash { animation: flash .35s ease; }
+
+    .input { border:1px solid rgba(0,0,0,.15); border-radius:.75rem; padding:.55rem .8rem; width:100%; }
+    @media (prefers-color-scheme: dark) {
+      .ghost-btn, .input { background:#171717; color:#f5f5f5; border-color:#27272a; }
+      .primary-btn { background:#1d4ed8; }
+      .primary-btn:hover { background:#1e40af; }
+    }
   </style>
 </head>
 <body class="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-neutral-950 dark:to-neutral-900 text-slate-900 dark:text-slate-100">
@@ -62,8 +98,8 @@
 
       <details class="text-sm opacity-80">
         <summary class="cursor-pointer">What gets stored?</summary>
-        This app stores your passes as a single JSON file in your Google Drive, inside a visible folder.
-        You can delete it anytime from Drive. The app only has access to files it creates (scope: <code>drive.file</code>).
+        This app saves your passes to a visible JSON file in your Google Drive (or locally if not signed in).
+        You can delete the file/folder anytime in Drive.
       </details>
     </section>
 
@@ -72,7 +108,7 @@
       <form id="addForm" class="grid sm:grid-cols-4 gap-3">
         <div class="sm:col-span-2">
           <label class="text-sm opacity-80">Gym name</label>
-          <input id="gymName" class="input" required placeholder="e.g., Boulder+ A Day Pass" />
+          <input id="gymName" class="input" required placeholder="e.g., Boulder+ Multi-pass" />
         </div>
         <div>
           <label class="text-sm opacity-80">Remaining uses</label>
@@ -109,30 +145,25 @@
   </div>
 
   <script>
-    // ================== CONFIG: CHANGE THESE IF YOU LIKE ==================
+    // ================== CONFIG ==================
     const CONFIG = {
       CLIENT_ID: '1011484435681-7c2gnoptr6ohppikqh6dbuiomcm923bj.apps.googleusercontent.com', // <-- REPLACE THIS
       SCOPES: 'https://www.googleapis.com/auth/drive.file',
       DRIVE_FOLDER_NAME: 'Climbing Pass Tracker',
       DRIVE_FILE_NAME: 'passes.json',
-      // Number of days considered "expiring soon"
       SOON_DAYS: 14,
     };
 
-    // ================== SIMPLE STATE ==================
+    // ================== STATE ==================
     let tokenClient = null;
     let accessToken = null;
-    let user = null;
-
     let folderId = null;
     let fileId = null;
-
-    // local app data
     let passes = []; // { id, gym, uses, expiryISO }
-    let dirty = false; // needs save
+    let dirty = false;
     const LS_KEY = 'climbingPassesLocalCache_v1';
 
-    // ================== UTILITIES ==================
+    // ================== HELPERS ==================
     const $ = (id) => document.getElementById(id);
 
     const fmtDate = (iso) => {
@@ -145,12 +176,9 @@
 
     const daysLeft = (iso) => {
       if (!iso) return null;
-      const today = new Date();
-      today.setHours(0,0,0,0);
-      const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
-      d.setHours(0,0,0,0);
-      const diff = Math.floor((d - today) / (1000*60*60*24));
-      return diff;
+      const today = new Date(); today.setHours(0,0,0,0);
+      const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : '')); d.setHours(0,0,0,0);
+      return Math.floor((d - today) / (1000*60*60*24));
     };
 
     const uid = () => Math.random().toString(36).slice(2, 10);
@@ -166,75 +194,54 @@
       );
     };
 
-    const markDirty = () => {
-      dirty = true;
-      setSyncStatus('Unsaved changes', 'idle');
-    };
-
-    const saveLocal = () => {
-      localStorage.setItem(LS_KEY, JSON.stringify({passes}));
-    };
-
-    const loadLocal = () => {
-      try {
-        const raw = localStorage.getItem(LS_KEY);
-        if (raw) {
-          const obj = JSON.parse(raw);
-          if (Array.isArray(obj.passes)) passes = obj.passes;
-        }
-      } catch {}
-    };
-
+    const markDirty = () => { dirty = true; setSyncStatus('Unsaved changes', 'idle'); };
     const nowStamp = () => new Date().toLocaleString();
+
+    const saveLocal = () => localStorage.setItem(LS_KEY, JSON.stringify({passes}));
+    const loadLocal = () => {
+      try { const obj = JSON.parse(localStorage.getItem(LS_KEY)||'{}'); if (Array.isArray(obj.passes)) passes = obj.passes; } catch {}
+    };
+    const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c] || c));
 
     // ================== RENDER ==================
     function render() {
-      const list = $('passList');
-      list.innerHTML = '';
-      if (!passes.length) {
-        $('emptyState').classList.remove('hidden');
-      } else {
-        $('emptyState').classList.add('hidden');
-      }
+      const list = $('passList'); list.innerHTML = '';
+      if (!passes.length) $('emptyState').classList.remove('hidden'); else $('emptyState').classList.add('hidden');
 
       let soonCount = 0;
+      passes.slice().sort((a,b) => (new Date(a.expiryISO)) - (new Date(b.expiryISO))).forEach(p => {
+        const dleft = daysLeft(p.expiryISO);
+        const soon = (dleft !== null && dleft <= CONFIG.SOON_DAYS);
+        if (soon) soonCount++;
 
-      passes
-        .slice()
-        .sort((a,b) => (new Date(a.expiryISO)) - (new Date(b.expiryISO)))
-        .forEach(p => {
-          const dleft = daysLeft(p.expiryISO);
-          const soon = (dleft !== null && dleft <= CONFIG.SOON_DAYS);
-          if (soon) soonCount++;
-
-          const li = document.createElement('li');
-          li.className = 'fade border rounded-2xl p-4 bg-white/70 dark:bg-neutral-900/50';
-
-          li.innerHTML = `
-            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-              <div class="space-y-1">
-                <div class="text-lg font-semibold">${escapeHtml(p.gym)}</div>
-                <div class="text-sm opacity-80">
-                  Expires: <span class="font-medium">${fmtDate(p.expiryISO)}</span>
-                  · Days left: <span class="font-semibold ${dleft < 0 ? 'text-rose-600' : soon ? 'text-amber-600' : 'text-emerald-600'}">${dleft}</span>
-                </div>
-              </div>
-              <div class="flex items-center gap-2">
-                <button class="ghost-btn" data-act="dec" data-id="${p.id}">−1</button>
-                <span class="px-3 py-1 rounded-xl border select-none">Uses: <span class="font-semibold">${p.uses}</span></span>
-                <button class="ghost-btn" data-act="inc" data-id="${p.id}">+1</button>
-                <button class="ghost-btn" data-act="edit" data-id="${p.id}">Edit</button>
-                <button class="danger-btn" data-act="del" data-id="${p.id}">Delete</button>
+        const li = document.createElement('li');
+        li.className = 'fade border rounded-2xl p-4 bg-white/70 dark:bg-neutral-900/50';
+        li.innerHTML = `
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div class="space-y-1">
+              <div class="text-lg font-semibold">${escapeHtml(p.gym)}</div>
+              <div class="text-sm opacity-80">
+                Expires: <span class="font-medium">${fmtDate(p.expiryISO)}</span>
+                · Days left:
+                <span class="font-semibold ${dleft < 0 ? 'text-rose-600' : soon ? 'text-amber-600' : 'text-emerald-600'}">${dleft}</span>
               </div>
             </div>
-          `;
-          list.appendChild(li);
-        });
+            <div class="flex items-center gap-2">
+              <button class="use-btn minus" data-act="dec" data-id="${p.id}">−1</button>
+              <span class="px-3 py-1 rounded-xl border select-none">Uses: <span class="font-semibold">${p.uses ?? 0}</span></span>
+              <button class="use-btn plus" data-act="inc" data-id="${p.id}">+1</button>
+              <button class="ghost-btn" data-act="edit" data-id="${p.id}">Edit</button>
+              <button class="danger-btn" data-act="del" data-id="${p.id}">Delete</button>
+            </div>
+          </div>
+        `;
+        list.appendChild(li);
+      });
 
       $('countTotal').textContent = String(passes.length);
       $('countSoon').textContent = String(soonCount);
 
-      // Attach actions
+      // Button handlers with feedback flash
       list.querySelectorAll('button').forEach(btn => {
         btn.addEventListener('click', (e) => {
           const id = e.currentTarget.getAttribute('data-id');
@@ -244,14 +251,18 @@
 
           if (act === 'inc') passes[idx].uses = Math.max(0, (passes[idx].uses || 0) + 1);
           if (act === 'dec') passes[idx].uses = Math.max(0, (passes[idx].uses || 0) - 1);
-          if (act === 'del') {
-            if (confirm('Delete this pass?')) passes.splice(idx, 1);
+
+          // feedback on +/- buttons
+          if (act === 'inc' || act === 'dec') {
+            const btn = e.currentTarget;
+            btn.classList.add('flash');
+            setTimeout(() => btn.classList.remove('flash'), 300);
           }
+
+          if (act === 'del') { if (confirm('Delete this pass?')) passes.splice(idx, 1); }
           if (act === 'edit') openEditDialog(passes[idx]);
 
-          markDirty();
-          saveLocal();
-          render();
+          markDirty(); saveLocal(); render();
         });
       });
     }
@@ -259,61 +270,70 @@
     function openEditDialog(pass) {
       const gym = prompt('Gym name:', pass.gym);
       if (gym === null) return;
-
       let uses = prompt('Remaining uses (integer ≥ 0):', String(pass.uses ?? 0));
       if (uses === null) return;
-      uses = parseInt(uses, 10);
-      if (Number.isNaN(uses) || uses < 0) return alert('Uses must be a non-negative integer.');
-
+      uses = parseInt(uses,10); if (Number.isNaN(uses) || uses < 0) return alert('Uses must be a non-negative integer.');
       const expiry = prompt('Expiry date (YYYY-MM-DD):', pass.expiryISO);
       if (expiry === null) return;
       if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return alert('Please enter date as YYYY-MM-DD.');
-
-      pass.gym = gym.trim();
-      pass.uses = uses;
-      pass.expiryISO = expiry;
-
-      markDirty();
-      saveLocal();
-      render();
-    }
-
-    function escapeHtml(s) {
-      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      pass.gym = gym.trim(); pass.uses = uses; pass.expiryISO = expiry;
+      markDirty(); saveLocal(); render();
     }
 
     // ================== AUTH (GIS) ==================
+    function showAuthUI(signedIn) {
+      $('authStatus').textContent = signedIn ? 'Signed in' : 'Not signed in';
+      $('signInBtn').classList.toggle('hidden', signedIn);
+      $('signOutBtn').classList.toggle('hidden', !signedIn);
+    }
+
+    function parseGISError(resp) {
+      const txt = resp?.error_description || resp?.error || 'Sign-in failed.';
+      if (txt.includes('origin_mismatch')) return 'Origin mismatch: add your site to "Authorized JavaScript origins".';
+      if (txt.includes('redirect_uri_mismatch')) return 'Redirect URI mismatch: remove redirect URIs; only add JavaScript origins.';
+      if (txt.includes('access_denied') || txt.includes('consent_required')) return 'Access denied or cancelled.';
+      return 'Google sign-in error (403/400). Check consent screen status and tester list or publish the app.';
+    }
+
+    function parseDriveError(err) {
+      const t = String(err?.message || err);
+      if (t.includes('HTTP 403')) return 'Drive access forbidden (403). Ensure Drive API enabled and you granted permission.';
+      if (t.includes('HTTP 401')) return 'Drive token expired/invalid (401). Please sign in again.';
+      return 'Drive error: ' + t.slice(0, 300);
+    }
+
     function initAuth() {
       tokenClient = google.accounts.oauth2.initTokenClient({
         client_id: CONFIG.CLIENT_ID,
         scope: CONFIG.SCOPES,
-        callback: (tokResp) => {
-          accessToken = tokResp.access_token;
-          $('authStatus').textContent = 'Signed in';
-          $('signInBtn').classList.add('hidden');
-          $('signOutBtn').classList.remove('hidden');
-          // After sign-in, load from Drive (or create storage)
-          ensureDriveStorage().then(loadFromDriveToState).catch(err => {
-            console.error(err);
-            setSyncStatus('Drive error', 'error');
-            alert('Drive error: ' + (err?.message || err));
-          });
+        callback: async (resp) => {
+          if (resp?.access_token) {
+            accessToken = resp.access_token;
+            showAuthUI(true);
+            try {
+              await ensureDriveStorage();
+              await loadFromDriveToState();
+            } catch (err) {
+              console.error('Drive init/load failed:', err);
+              setSyncStatus('Drive error', 'error');
+              alert(parseDriveError(err));
+            }
+            return;
+          }
+          alert(parseGISError(resp));
+          showAuthUI(false);
         },
       });
     }
 
-    function signIn() {
-      if (!tokenClient) return;
-      tokenClient.requestAccessToken({ prompt: 'consent' });
+    function signInInteractive() {
+      tokenClient.requestAccessToken({ prompt: 'consent', include_granted_scopes: true });
     }
-
+    function trySilentSignIn() {
+      tokenClient.requestAccessToken({ prompt: '', include_granted_scopes: true });
+    }
     function signOut() {
-      accessToken = null;
-      $('authStatus').textContent = 'Not signed in';
-      $('signInBtn').classList.remove('hidden');
-      $('signOutBtn').classList.add('hidden');
-      setSyncStatus('Signed out', 'idle');
-      // Keep local data so user doesn’t lose unsaved changes
+      accessToken = null; showAuthUI(false); setSyncStatus('Signed out','idle');
     }
 
     // ================== DRIVE HELPERS ==================
@@ -321,42 +341,30 @@
       if (!accessToken) throw new Error('No access token');
       const res = await fetch(url, {
         ...options,
-        headers: {
-          'Authorization': 'Bearer ' + accessToken,
-          ...(options.headers || {}),
-        }
+        headers: { 'Authorization': 'Bearer ' + accessToken, ...(options.headers || {}) }
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error('HTTP ' + res.status + ': ' + text);
-      }
+      if (!res.ok) { const text = await res.text(); throw new Error('HTTP ' + res.status + ': ' + text); }
       return res;
     }
 
     async function findFolderByName(name) {
       const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${name.replace(/'/g, "\\'")}' and trashed=false`);
       const res = await gFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
-      const data = await res.json();
-      return data.files?.[0] || null;
+      const data = await res.json(); return data.files?.[0] || null;
     }
 
     async function createFolder(name) {
       const res = await gFetch('https://www.googleapis.com/drive/v3/files', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          name,
-          mimeType: 'application/vnd.google-apps.folder'
-        }),
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder' })
       });
-      return await res.json(); // { id, name, ... }
+      return await res.json();
     }
 
     async function findFileInFolder(fname, folderId) {
       const q = encodeURIComponent(`name='${fname.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed=false`);
       const res = await gFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
-      const data = await res.json();
-      return data.files?.[0] || null;
+      const data = await res.json(); return data.files?.[0] || null;
     }
 
     function buildMultipart(metadata, content) {
@@ -364,13 +372,8 @@
       const delim = '\r\n--' + boundary + '\r\n';
       const closeDelim = '\r\n--' + boundary + '--';
       const body =
-        delim +
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-        JSON.stringify(metadata) +
-        delim +
-        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-        content +
-        closeDelim;
+        delim + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) +
+        delim + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + content + closeDelim;
       return { body, boundary };
     }
 
@@ -379,33 +382,27 @@
       const content = JSON.stringify(jsonObj, null, 2);
       const { body, boundary } = buildMultipart(metadata, content);
       const res = await gFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-        method: 'POST',
-        headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
-        body
+        method: 'POST', headers: { 'Content-Type': 'multipart/related; boundary=' + boundary }, body
       });
-      return await res.json(); // { id, name, ... }
+      return await res.json();
     }
 
     async function updateJsonFile(fileId, jsonObj) {
-      const metadata = {}; // keep name/parents
+      const metadata = {};
       const content = JSON.stringify(jsonObj, null, 2);
       const { body, boundary } = buildMultipart(metadata, content);
       const res = await gFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
-        body
+        method:'PATCH', headers:{ 'Content-Type': 'multipart/related; boundary=' + boundary }, body
       });
       return await res.json();
     }
 
     async function readJsonFile(fileId) {
-      // Get file content
       const res = await gFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
       const text = await res.text();
       try { return JSON.parse(text); } catch { return { passes: [] }; }
     }
 
-    // Ensure folder & file exist
     async function ensureDriveStorage() {
       setSyncStatus('Checking Drive...', 'idle');
       let folder = await findFolderByName(CONFIG.DRIVE_FOLDER_NAME);
@@ -430,7 +427,7 @@
       const data = await readJsonFile(fileId);
       if (Array.isArray(data.passes)) {
         passes = data.passes;
-        saveLocal(); // keep local cache in sync
+        saveLocal();
         dirty = false;
         $('lastSaved').textContent = 'Loaded: ' + nowStamp();
         setSyncStatus('Loaded', 'ok');
@@ -445,24 +442,20 @@
 
     async function saveToDrive() {
       if (!fileId) {
-        // If user isn’t signed in, just save locally
         saveLocal();
         setSyncStatus('Saved locally', 'ok');
         $('lastSaved').textContent = 'Saved locally: ' + nowStamp();
-        dirty = false;
-        return;
+        dirty = false; return;
       }
       setSyncStatus('Saving...', 'saving');
-      const payload = { passes };
-      await updateJsonFile(fileId, payload);
+      await updateJsonFile(fileId, { passes });
       setSyncStatus('Saved to Drive', 'ok');
       $('lastSaved').textContent = 'Saved: ' + nowStamp();
       dirty = false;
     }
 
-    // ================== EVENTS ==================
+    // ================== BOOT ==================
     window.addEventListener('load', () => {
-      // Initialize UI
       $('folderNameLabel').textContent = CONFIG.DRIVE_FOLDER_NAME;
       $('fileNameLabel').textContent = CONFIG.DRIVE_FILE_NAME;
 
@@ -470,63 +463,42 @@
       render();
       initAuth();
 
-      $('signInBtn').addEventListener('click', signIn);
+      $('signInBtn').addEventListener('click', signInInteractive);
       $('signOutBtn').addEventListener('click', signOut);
 
       $('saveNowBtn').addEventListener('click', async () => {
         try { await saveToDrive(); }
-        catch (e) {
-          console.error(e);
-          setSyncStatus('Save failed', 'error');
-          alert('Save failed: ' + (e?.message || e));
-        }
+        catch (e) { console.error(e); setSyncStatus('Save failed','error'); alert('Save failed: ' + (e?.message || e)); }
       });
 
       $('addForm').addEventListener('submit', (e) => {
         e.preventDefault();
         const gym = $('gymName').value.trim();
         const uses = parseInt($('uses').value, 10);
-        const expiry = $('expiry').value; // YYYY-MM-DD
-        if (!gym || Number.isNaN(uses) || uses < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
-          return alert('Please fill all fields correctly.');
-        }
-        passes.push({
-          id: uid(),
-          gym,
-          uses,
-          expiryISO: expiry
-        });
-        $('gymName').value = '';
-        $('uses').value = '1';
-        $('expiry').value = '';
-        markDirty();
-        saveLocal();
-        render();
+        const expiry = $('expiry').value;
+        if (!gym || Number.isNaN(uses) || uses < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return alert('Please fill all fields correctly.');
+        passes.push({ id: uid(), gym, uses, expiryISO: expiry });
+        $('gymName').value = ''; $('uses').value = '1'; $('expiry').value = '';
+        markDirty(); saveLocal(); render();
       });
 
-      // Auto-save on changes after short debounce
+      // gentle auto-save after list changes
       let saveTimer = null;
       const requestSave = () => {
         if (!dirty) return;
         clearTimeout(saveTimer);
         saveTimer = setTimeout(async () => {
-          try { await saveToDrive(); }
-          catch (e) {
-            console.error(e);
-            setSyncStatus('Auto-save failed', 'error');
-          }
+          try { await saveToDrive(); } catch (e) { console.error(e); setSyncStatus('Auto-save failed','error'); }
         }, 800);
       };
-      // Observe mutations to the list & mark saves (simple approach)
       const mo = new MutationObserver(requestSave);
       mo.observe($('passList'), { childList: true, subtree: true });
 
-      // Also attempt save before unload
-      window.addEventListener('beforeunload', () => {
-        if (dirty) saveLocal();
-      });
+      // Try silent sign-in for returning users
+      setTimeout(() => { trySilentSignIn(); }, 300);
+
+      window.addEventListener('beforeunload', () => { if (dirty) saveLocal(); });
     });
   </script>
 </body>
 </html>
-
