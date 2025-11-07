@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Climbing Pass Tracker</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Tailwind (CDN) for quick styling) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Identity Services -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
+  <!--
+    ========================== IMPORTANT SETUP ==========================
+    1) Create a Google Cloud project → OAuth 2.0 Client ID (Web) with:
+       - Authorized JavaScript origins:
+         e.g. https://<your-username>.github.io  (or your custom domain)
+    2) Enable the "Google Drive API".
+    3) Replace CLIENT_ID below with your OAuth client id.
+    4) This app uses scope: https://www.googleapis.com/auth/drive.file
+       - Access limited to files/folders the app creates (and ones the user explicitly opens via the app).
+       - Files/folder are NOT hidden (user can see & delete them anytime in Drive).
+    5) Host this file on GitHub Pages and you're done.
+    ====================================================================
+  -->
+
+  <style>
+    /* Minimal focus & transitions */
+    :root { color-scheme: light dark; }
+    .fade { transition: all 200ms ease; }
+    .card { @apply rounded-2xl shadow p-5 bg-white/80 dark:bg-neutral-900/70 backdrop-blur; }
+    .ghost-btn { @apply px-3 py-1.5 rounded-xl border hover:shadow-sm text-sm; }
+    .primary-btn { @apply px-4 py-2 rounded-xl text-white bg-blue-600 hover:bg-blue-700 shadow; }
+    .danger-btn { @apply px-3 py-1.5 rounded-xl text-white bg-rose-600 hover:bg-rose-700 shadow; }
+    .pill { @apply text-xs px-2 py-1 rounded-full; }
+    .input { @apply border rounded-xl px-3 py-2 w-full bg-white dark:bg-neutral-800; }
+    .linkish { @apply underline underline-offset-2 hover:opacity-80 cursor-pointer; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-neutral-950 dark:to-neutral-900 text-slate-900 dark:text-slate-100">
+  <div class="max-w-4xl mx-auto p-6 space-y-6">
+    <header class="flex items-center justify-between">
+      <h1 class="text-2xl sm:text-3xl font-bold">Climbing Pass Tracker</h1>
+      <div class="flex items-center gap-2">
+        <span id="authStatus" class="text-sm opacity-80">Not signed in</span>
+        <button id="signInBtn" class="ghost-btn">Sign in with Google</button>
+        <button id="signOutBtn" class="ghost-btn hidden">Sign out</button>
+      </div>
+    </header>
+
+    <section class="card flex flex-col gap-4">
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="text-sm opacity-80">
+          Drive folder: <span class="font-semibold" id="folderNameLabel">Climbing Pass Tracker</span> ·
+          File: <span class="font-semibold" id="fileNameLabel">passes.json</span>
+        </div>
+        <div id="syncPill" class="pill bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100">Idle</div>
+        <button id="saveNowBtn" class="ghost-btn">Save now</button>
+        <span id="lastSaved" class="text-xs opacity-70"></span>
+      </div>
+
+      <details class="text-sm opacity-80">
+        <summary class="cursor-pointer">What gets stored?</summary>
+        This app stores your passes as a single JSON file in your Google Drive, inside a visible folder.
+        You can delete it anytime from Drive. The app only has access to files it creates (scope: <code>drive.file</code>).
+      </details>
+    </section>
+
+    <section class="card">
+      <h2 class="text-xl font-semibold mb-4">Add a pass</h2>
+      <form id="addForm" class="grid sm:grid-cols-4 gap-3">
+        <div class="sm:col-span-2">
+          <label class="text-sm opacity-80">Gym name</label>
+          <input id="gymName" class="input" required placeholder="e.g., Boulder+ A Day Pass" />
+        </div>
+        <div>
+          <label class="text-sm opacity-80">Remaining uses</label>
+          <input id="uses" type="number" min="0" step="1" class="input" required value="1" />
+        </div>
+        <div>
+          <label class="text-sm opacity-80">Expiry date</label>
+          <input id="expiry" type="date" class="input" required />
+        </div>
+        <div class="sm:col-span-4 flex justify-end">
+          <button class="primary-btn" type="submit">Add pass</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xl font-semibold">Your passes</h2>
+        <div class="text-sm opacity-80">
+          Total: <span id="countTotal">0</span> · Expiring soon: <span id="countSoon">0</span>
+        </div>
+      </div>
+
+      <div id="emptyState" class="text-sm opacity-70">
+        No passes yet. Add your first pass above!
+      </div>
+
+      <ul id="passList" class="space-y-3"></ul>
+    </section>
+
+    <footer class="py-6 text-center text-xs opacity-70">
+      Made with ❤️ · Client-side only · Host on GitHub Pages
+    </footer>
+  </div>
+
+  <script>
+    // ================== CONFIG: CHANGE THESE IF YOU LIKE ==================
+    const CONFIG = {
+      CLIENT_ID: 'YOUR_GOOGLE_OAUTH_CLIENT_ID', // <-- REPLACE THIS
+      SCOPES: 'https://www.googleapis.com/auth/drive.file',
+      DRIVE_FOLDER_NAME: 'Climbing Pass Tracker',
+      DRIVE_FILE_NAME: 'passes.json',
+      // Number of days considered "expiring soon"
+      SOON_DAYS: 14,
+    };
+
+    // ================== SIMPLE STATE ==================
+    let tokenClient = null;
+    let accessToken = null;
+    let user = null;
+
+    let folderId = null;
+    let fileId = null;
+
+    // local app data
+    let passes = []; // { id, gym, uses, expiryISO }
+    let dirty = false; // needs save
+    const LS_KEY = 'climbingPassesLocalCache_v1';
+
+    // ================== UTILITIES ==================
+    const $ = (id) => document.getElementById(id);
+
+    const fmtDate = (iso) => {
+      if (!iso) return '—';
+      try {
+        const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
+        return d.toLocaleDateString();
+      } catch { return iso; }
+    };
+
+    const daysLeft = (iso) => {
+      if (!iso) return null;
+      const today = new Date();
+      today.setHours(0,0,0,0);
+      const d = new Date(iso + (iso.length === 10 ? 'T00:00:00' : ''));
+      d.setHours(0,0,0,0);
+      const diff = Math.floor((d - today) / (1000*60*60*24));
+      return diff;
+    };
+
+    const uid = () => Math.random().toString(36).slice(2, 10);
+
+    const setSyncStatus = (text, tone = 'idle') => {
+      const el = $('syncPill');
+      el.textContent = text;
+      el.className = 'pill ' + (
+        tone === 'saving' ? 'bg-blue-100 text-blue-900 dark:bg-blue-900 dark:text-blue-100' :
+        tone === 'error'  ? 'bg-rose-100 text-rose-900 dark:bg-rose-900 dark:text-rose-100' :
+        tone === 'ok'     ? 'bg-emerald-100 text-emerald-900 dark:bg-emerald-900 dark:text-emerald-100' :
+                            'bg-amber-100 text-amber-900 dark:bg-amber-900 dark:text-amber-100'
+      );
+    };
+
+    const markDirty = () => {
+      dirty = true;
+      setSyncStatus('Unsaved changes', 'idle');
+    };
+
+    const saveLocal = () => {
+      localStorage.setItem(LS_KEY, JSON.stringify({passes}));
+    };
+
+    const loadLocal = () => {
+      try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (raw) {
+          const obj = JSON.parse(raw);
+          if (Array.isArray(obj.passes)) passes = obj.passes;
+        }
+      } catch {}
+    };
+
+    const nowStamp = () => new Date().toLocaleString();
+
+    // ================== RENDER ==================
+    function render() {
+      const list = $('passList');
+      list.innerHTML = '';
+      if (!passes.length) {
+        $('emptyState').classList.remove('hidden');
+      } else {
+        $('emptyState').classList.add('hidden');
+      }
+
+      let soonCount = 0;
+
+      passes
+        .slice()
+        .sort((a,b) => (new Date(a.expiryISO)) - (new Date(b.expiryISO)))
+        .forEach(p => {
+          const dleft = daysLeft(p.expiryISO);
+          const soon = (dleft !== null && dleft <= CONFIG.SOON_DAYS);
+          if (soon) soonCount++;
+
+          const li = document.createElement('li');
+          li.className = 'fade border rounded-2xl p-4 bg-white/70 dark:bg-neutral-900/50';
+
+          li.innerHTML = `
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div class="space-y-1">
+                <div class="text-lg font-semibold">${escapeHtml(p.gym)}</div>
+                <div class="text-sm opacity-80">
+                  Expires: <span class="font-medium">${fmtDate(p.expiryISO)}</span>
+                  · Days left: <span class="font-semibold ${dleft < 0 ? 'text-rose-600' : soon ? 'text-amber-600' : 'text-emerald-600'}">${dleft}</span>
+                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <button class="ghost-btn" data-act="dec" data-id="${p.id}">−1</button>
+                <span class="px-3 py-1 rounded-xl border select-none">Uses: <span class="font-semibold">${p.uses}</span></span>
+                <button class="ghost-btn" data-act="inc" data-id="${p.id}">+1</button>
+                <button class="ghost-btn" data-act="edit" data-id="${p.id}">Edit</button>
+                <button class="danger-btn" data-act="del" data-id="${p.id}">Delete</button>
+              </div>
+            </div>
+          `;
+          list.appendChild(li);
+        });
+
+      $('countTotal').textContent = String(passes.length);
+      $('countSoon').textContent = String(soonCount);
+
+      // Attach actions
+      list.querySelectorAll('button').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const id = e.currentTarget.getAttribute('data-id');
+          const act = e.currentTarget.getAttribute('data-act');
+          const idx = passes.findIndex(x => x.id === id);
+          if (idx === -1) return;
+
+          if (act === 'inc') passes[idx].uses = Math.max(0, (passes[idx].uses || 0) + 1);
+          if (act === 'dec') passes[idx].uses = Math.max(0, (passes[idx].uses || 0) - 1);
+          if (act === 'del') {
+            if (confirm('Delete this pass?')) passes.splice(idx, 1);
+          }
+          if (act === 'edit') openEditDialog(passes[idx]);
+
+          markDirty();
+          saveLocal();
+          render();
+        });
+      });
+    }
+
+    function openEditDialog(pass) {
+      const gym = prompt('Gym name:', pass.gym);
+      if (gym === null) return;
+
+      let uses = prompt('Remaining uses (integer ≥ 0):', String(pass.uses ?? 0));
+      if (uses === null) return;
+      uses = parseInt(uses, 10);
+      if (Number.isNaN(uses) || uses < 0) return alert('Uses must be a non-negative integer.');
+
+      const expiry = prompt('Expiry date (YYYY-MM-DD):', pass.expiryISO);
+      if (expiry === null) return;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return alert('Please enter date as YYYY-MM-DD.');
+
+      pass.gym = gym.trim();
+      pass.uses = uses;
+      pass.expiryISO = expiry;
+
+      markDirty();
+      saveLocal();
+      render();
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // ================== AUTH (GIS) ==================
+    function initAuth() {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CONFIG.CLIENT_ID,
+        scope: CONFIG.SCOPES,
+        callback: (tokResp) => {
+          accessToken = tokResp.access_token;
+          $('authStatus').textContent = 'Signed in';
+          $('signInBtn').classList.add('hidden');
+          $('signOutBtn').classList.remove('hidden');
+          // After sign-in, load from Drive (or create storage)
+          ensureDriveStorage().then(loadFromDriveToState).catch(err => {
+            console.error(err);
+            setSyncStatus('Drive error', 'error');
+            alert('Drive error: ' + (err?.message || err));
+          });
+        },
+      });
+    }
+
+    function signIn() {
+      if (!tokenClient) return;
+      tokenClient.requestAccessToken({ prompt: 'consent' });
+    }
+
+    function signOut() {
+      accessToken = null;
+      $('authStatus').textContent = 'Not signed in';
+      $('signInBtn').classList.remove('hidden');
+      $('signOutBtn').classList.add('hidden');
+      setSyncStatus('Signed out', 'idle');
+      // Keep local data so user doesn’t lose unsaved changes
+    }
+
+    // ================== DRIVE HELPERS ==================
+    async function gFetch(url, options = {}) {
+      if (!accessToken) throw new Error('No access token');
+      const res = await fetch(url, {
+        ...options,
+        headers: {
+          'Authorization': 'Bearer ' + accessToken,
+          ...(options.headers || {}),
+        }
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error('HTTP ' + res.status + ': ' + text);
+      }
+      return res;
+    }
+
+    async function findFolderByName(name) {
+      const q = encodeURIComponent(`mimeType='application/vnd.google-apps.folder' and name='${name.replace(/'/g, "\\'")}' and trashed=false`);
+      const res = await gFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+      const data = await res.json();
+      return data.files?.[0] || null;
+    }
+
+    async function createFolder(name) {
+      const res = await gFetch('https://www.googleapis.com/drive/v3/files', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          name,
+          mimeType: 'application/vnd.google-apps.folder'
+        }),
+      });
+      return await res.json(); // { id, name, ... }
+    }
+
+    async function findFileInFolder(fname, folderId) {
+      const q = encodeURIComponent(`name='${fname.replace(/'/g, "\\'")}' and '${folderId}' in parents and trashed=false`);
+      const res = await gFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+      const data = await res.json();
+      return data.files?.[0] || null;
+    }
+
+    function buildMultipart(metadata, content) {
+      const boundary = '-------314159265358979323846';
+      const delim = '\r\n--' + boundary + '\r\n';
+      const closeDelim = '\r\n--' + boundary + '--';
+      const body =
+        delim +
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+        JSON.stringify(metadata) +
+        delim +
+        'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+        content +
+        closeDelim;
+      return { body, boundary };
+    }
+
+    async function createJsonFileInFolder(fname, folderId, jsonObj) {
+      const metadata = { name: fname, parents: [folderId] };
+      const content = JSON.stringify(jsonObj, null, 2);
+      const { body, boundary } = buildMultipart(metadata, content);
+      const res = await gFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+        body
+      });
+      return await res.json(); // { id, name, ... }
+    }
+
+    async function updateJsonFile(fileId, jsonObj) {
+      const metadata = {}; // keep name/parents
+      const content = JSON.stringify(jsonObj, null, 2);
+      const { body, boundary } = buildMultipart(metadata, content);
+      const res = await gFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+        body
+      });
+      return await res.json();
+    }
+
+    async function readJsonFile(fileId) {
+      // Get file content
+      const res = await gFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+      const text = await res.text();
+      try { return JSON.parse(text); } catch { return { passes: [] }; }
+    }
+
+    // Ensure folder & file exist
+    async function ensureDriveStorage() {
+      setSyncStatus('Checking Drive...', 'idle');
+      let folder = await findFolderByName(CONFIG.DRIVE_FOLDER_NAME);
+      if (!folder) {
+        setSyncStatus('Creating folder...', 'saving');
+        folder = await createFolder(CONFIG.DRIVE_FOLDER_NAME);
+      }
+      folderId = folder.id;
+
+      let file = await findFileInFolder(CONFIG.DRIVE_FILE_NAME, folderId);
+      if (!file) {
+        setSyncStatus('Creating file...', 'saving');
+        file = await createJsonFileInFolder(CONFIG.DRIVE_FILE_NAME, folderId, { passes: [] });
+      }
+      fileId = file.id;
+      setSyncStatus('Ready', 'ok');
+    }
+
+    async function loadFromDriveToState() {
+      if (!fileId) return;
+      setSyncStatus('Loading from Drive...', 'saving');
+      const data = await readJsonFile(fileId);
+      if (Array.isArray(data.passes)) {
+        passes = data.passes;
+        saveLocal(); // keep local cache in sync
+        dirty = false;
+        $('lastSaved').textContent = 'Loaded: ' + nowStamp();
+        setSyncStatus('Loaded', 'ok');
+        render();
+      } else {
+        setSyncStatus('Invalid file format', 'error');
+        alert('Drive file format invalid. Resetting to empty list.');
+        passes = [];
+        await saveToDrive();
+      }
+    }
+
+    async function saveToDrive() {
+      if (!fileId) {
+        // If user isn’t signed in, just save locally
+        saveLocal();
+        setSyncStatus('Saved locally', 'ok');
+        $('lastSaved').textContent = 'Saved locally: ' + nowStamp();
+        dirty = false;
+        return;
+      }
+      setSyncStatus('Saving...', 'saving');
+      const payload = { passes };
+      await updateJsonFile(fileId, payload);
+      setSyncStatus('Saved to Drive', 'ok');
+      $('lastSaved').textContent = 'Saved: ' + nowStamp();
+      dirty = false;
+    }
+
+    // ================== EVENTS ==================
+    window.addEventListener('load', () => {
+      // Initialize UI
+      $('folderNameLabel').textContent = CONFIG.DRIVE_FOLDER_NAME;
+      $('fileNameLabel').textContent = CONFIG.DRIVE_FILE_NAME;
+
+      loadLocal();
+      render();
+      initAuth();
+
+      $('signInBtn').addEventListener('click', signIn);
+      $('signOutBtn').addEventListener('click', signOut);
+
+      $('saveNowBtn').addEventListener('click', async () => {
+        try { await saveToDrive(); }
+        catch (e) {
+          console.error(e);
+          setSyncStatus('Save failed', 'error');
+          alert('Save failed: ' + (e?.message || e));
+        }
+      });
+
+      $('addForm').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const gym = $('gymName').value.trim();
+        const uses = parseInt($('uses').value, 10);
+        const expiry = $('expiry').value; // YYYY-MM-DD
+        if (!gym || Number.isNaN(uses) || uses < 0 || !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
+          return alert('Please fill all fields correctly.');
+        }
+        passes.push({
+          id: uid(),
+          gym,
+          uses,
+          expiryISO: expiry
+        });
+        $('gymName').value = '';
+        $('uses').value = '1';
+        $('expiry').value = '';
+        markDirty();
+        saveLocal();
+        render();
+      });
+
+      // Auto-save on changes after short debounce
+      let saveTimer = null;
+      const requestSave = () => {
+        if (!dirty) return;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(async () => {
+          try { await saveToDrive(); }
+          catch (e) {
+            console.error(e);
+            setSyncStatus('Auto-save failed', 'error');
+          }
+        }, 800);
+      };
+      // Observe mutations to the list & mark saves (simple approach)
+      const mo = new MutationObserver(requestSave);
+      mo.observe($('passList'), { childList: true, subtree: true });
+
+      // Also attempt save before unload
+      window.addEventListener('beforeunload', () => {
+        if (dirty) saveLocal();
+      });
+    });
+  </script>
+</body>
+</html>
